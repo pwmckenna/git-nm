@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-var Q = require('q');
 var assert = require('assert');
 var cp = require('child_process');
 var rpt = require ('read-package-tree');
@@ -11,77 +10,64 @@ var owners = process.argv.splice(2).map(function (owner) {
   return owner.toLowerCase();
 });
 
+function matchGitUrl(url) {
+  var match = (
+    url.match(/git\+https:\/\/github\.com\/(.*)\/(.*)\.git/) ||
+    url.match(/git:\/\/github\.com\/(.*)\/(.*)\.git/) ||
+    url.match(/git\+ssh:\/\/git@github.com\/(.*)\/(.*)\.git/)
+  );
+  return match;
+}
+
 function getGitUrlOwner (url) {
-  var match = url.match(/git\+https:\/\/github.com\/(.*)\/.*\.git/);
-  assert(match);
-  return match[1];
+  return matchGitUrl(url)[1];
 }
 
 function convertGitUrl (url) {
-  var match = url.match(/git\+https:\/\/github.com\/(.*)\/(.*)\.git/);
-  assert(match);
-
+  var match = matchGitUrl(url);
   return 'git@github.com:' + match[1] + '/' + match[2] + '.git'
 }
 
 function git (data) {
-  if (
-    data.package.gitHead &&
-    data.package.repository.type === 'git' &&
-    data.package.repository.url.indexOf('git+https://') === 0 &&
-    owners.indexOf(getGitUrlOwner(data.package.repository.url).toLowerCase()) > -1
-  ) {
-    var debug = require('debug')(data.package.name);
+  data.children.forEach(git);
 
-    var execSync = function (cmd) {
-      debug('> %s', cmd);
-      var res = cp.execSync(cmd, {
-        cwd: data.realpath,
-        stdio: [null, 'pipe', 'pipe']
-      }).toString().trim();
-      return res;
-    }
+  if (!data.package.repository) return;
+  if (data.package.repository.type !== 'git') return;
+  if (!matchGitUrl(data.package.repository.url)) return;
+  if (owners.indexOf(getGitUrlOwner(data.package.repository.url).toLowerCase()) === -1) return;
+  if (!data.package.gitHead) return;
 
-    Q.fcall(function () {
-      return execSync('git status');
-    }).then(function (res) {
-      console.log('git status success', res);
-      return true;
-    }, function (err) {
-      console.log('git status failure', err);
-      return false;
-    }).then(function (isGitRepository) {
-      if (!isGitRepository) {
-        return Q.fcall(function () {
-          return execSync('rm -rf .git');
-        }).then(function () {
-          return execSync('git init');
-        }).then(function () {
-          return execSync('git remote add origin ' + convertGitUrl(data.package.repository.url));
-        }).then(function () {
-          return execSync('git fetch');
-        }).then(function () {
-          return execSync('git describe ' + data.package.gitHead + ' --tags');
-        }).then(function (res) {
-          return Q.fcall(function () {
-            return execSync('git reset ' + res);
-          }).then(function () {
-            return execSync('git checkout ' + res);
-          }).then(function () {
-            return execSync('git diff');
-          });
-        }).then(function () {
-          console.log('successfully checked out %s at %s.', data.package.name, data.realpath);
-        }, function (err) {
-          console.warn('failed to check out %s at %s: %o.', data.package.name, data.realpath, err);
-        });
-      } else {
-        console.log('already checked out %s at %s.', data.package.name, data.realpath);
-      }
-    });
+  var debug = require('debug')(data.package.name);
+
+  var execSync = function (cmd) {
+    debug('> %s', cmd);
+    var res = cp.execSync(cmd, {
+      cwd: data.realpath,
+      stdio: [null, 'pipe', 'pipe']
+    }).toString().trim();
+    debug(res);
+    return res;
   }
 
-  data.children.forEach(git);
+  try {
+    execSync('git status');
+    // if the repo is already a git repo, we're done here
+    console.log('already checked out %s at %s.', data.package.name, data.realpath);
+  } catch (err) {}
+
+  try {
+    execSync('rm -rf .git');
+    execSync('git init');
+    execSync('git remote add origin ' + convertGitUrl(data.package.repository.url));
+    execSync('git fetch');
+    var commit = execSync('git describe ' + data.package.gitHead + ' --tags').toString().trim();
+    execSync('git reset ' + commit);
+    execSync('git checkout ' + commit);
+    execSync('git diff');
+    console.log('successfully checked out %s at %s.', data.package.name, data.realpath);
+  } catch (err) {
+    console.warn('failed to check out %s at %s: %o.', data.package.name, data.realpath, err);
+  }
 }
 
 rpt(root, function (err, data) {
